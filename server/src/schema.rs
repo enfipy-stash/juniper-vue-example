@@ -1,107 +1,49 @@
+use crate::{context::JuniperContext, models::User};
 use futures::Stream;
 use juniper::{DefaultScalarValue, EmptyMutation, FieldError, RootNode};
 use std::{pin::Pin, time::Duration};
 
-#[derive(Clone)]
-pub struct Context {}
-
-impl juniper::Context for Context {}
-
-/// User representation
-pub struct User {
-    pub id: i32,
-    pub name: String,
-}
-
-#[juniper::graphql_object(Context = Context)]
-impl User {
-    fn id(&self) -> i32 {
-        self.id
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn friends(&self) -> Vec<User> {
-        if self.id == 1 {
-            return vec![
-                User {
-                    id: 11,
-                    name: "user11".into(),
-                },
-                User {
-                    id: 12,
-                    name: "user12".into(),
-                },
-                User {
-                    id: 13,
-                    name: "user13".into(),
-                },
-            ];
-        } else if self.id == 2 {
-            return vec![User {
-                id: 21,
-                name: "user21".into(),
-            }];
-        } else if self.id == 3 {
-            return vec![
-                User {
-                    id: 31,
-                    name: "user31".into(),
-                },
-                User {
-                    id: 32,
-                    name: "user32".into(),
-                },
-            ];
-        } else {
-            return vec![];
-        }
-    }
-}
-
+#[derive(Debug)]
 pub struct Query;
 
-#[juniper::graphql_object(Context = Context)]
+#[juniper::graphql_object(Context = JuniperContext)]
 impl Query {
-    async fn users(id: i32) -> Vec<User> {
-        vec![User {
-            id,
-            name: "user1".into(),
-        }]
+    fn users(ctx: &JuniperContext) -> Vec<User> {
+        ctx.database().get_all_users()
+    }
+
+    fn friends(ctx: &JuniperContext, id: i32) -> Vec<User> {
+        ctx.database().get_friends(id)
     }
 }
 
 type TypeAlias = Pin<Box<dyn Stream<Item = Result<User, FieldError>> + Send>>;
 
+#[derive(Debug)]
 pub struct Subscription;
 
-#[juniper::graphql_subscription(Context = Context)]
+#[juniper::graphql_subscription(Context = JuniperContext)]
 impl Subscription {
-    async fn users() -> TypeAlias {
+    async fn users(ctx: &JuniperContext) -> TypeAlias {
         let mut counter = 0;
+        let database = ctx.database();
         let stream = tokio::time::interval(Duration::from_secs(5)).map(move |_| {
-            counter += 1;
-            if counter == 2 {
-                Err(FieldError::new(
+            database
+                .get_user(counter)
+                .ok_or(FieldError::new(
                     "some field error from handler",
-                    Value::Scalar(DefaultScalarValue::String(
-                        "some additional string".to_string(),
-                    )),
+                    Value::Scalar(DefaultScalarValue::String("some additional string".to_string())),
                 ))
-            } else {
-                Ok(User {
-                    id: counter,
-                    name: "stream user".to_string(),
+                .and_then(|res| {
+                    counter += 1;
+                    Ok(res)
                 })
-            }
         });
         Box::pin(stream)
     }
 }
 
-pub type Schema = RootNode<'static, Query, EmptyMutation<Context>, Subscription>;
+pub type Schema = RootNode<'static, Query, EmptyMutation<JuniperContext>, Subscription>;
 
 pub fn init() -> Schema {
     Schema::new(Query, EmptyMutation::new(), Subscription)

@@ -5,8 +5,9 @@ mod schema;
 
 use actix::{Actor, StreamHandler};
 use actix_web::{
-    get, http::StatusCode, post, web, App, Error, FromRequest, HttpRequest, HttpResponse, HttpServer, Responder,
+    get, http::{header, StatusCode}, post, web, App, Error, FromRequest, HttpRequest, HttpResponse, HttpServer, Responder,
 };
+use actix_cors::Cors;
 use actix_web_actors::ws;
 use context::JuniperContext;
 use database::Database;
@@ -84,7 +85,7 @@ async fn subscriptions_handler(
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "debug,actix_server=info,actix_web=debug");
+    std::env::set_var("RUST_LOG", "debug,actix_server=info,actix_web=trace");
     env_logger::init();
 
     let graphql_root = Arc::new(schema::init());
@@ -92,13 +93,22 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
+            .wrap(
+                Cors::new()
+                    .allowed_methods(vec!["GET", "POST"])
+                    .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT])
+                    .allowed_header(header::CONTENT_TYPE)
+                    .supports_credentials()
+                    .max_age(3600)
+                    .finish(),
+            )
             .data(graphql_root.clone())
             .data(database.clone())
             .service(graphql_handler)
             .service(playground_handler)
             .service(subscriptions_handler)
     })
-    .bind("localhost:8080")?
+    .bind("localhost:3000")?
     .run()
     .await
 }

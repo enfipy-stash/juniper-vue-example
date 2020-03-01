@@ -86,9 +86,16 @@ impl Handler<JuniperResponce> for WebSocket {
     type Result = ();
 
     fn handle(&mut self, msg: JuniperResponce, ctx: &mut Self::Context) {
-        log::info!("{}", msg.json);
         ctx.text(msg.json);
     }
+}
+
+fn ws_error(request_id: &str, payload: &str) -> String {
+    format!(r#"{{"type":"error","id":"{}","payload":{}}}"#, request_id, payload)
+}
+
+fn ws_data(request_id: &str, payload: &str) -> String {
+    format!(r#"{{"type":"data","id":"{}","payload":{}}}"#, request_id, payload)
 }
 
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocket {
@@ -97,10 +104,12 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocket {
             Ok(ws::Message::Text(text)) => {
                 let request = serde_json::from_str::<WsPayload>(&text).unwrap();
                 match request.type_name.as_str() {
-                    "connection_init" => {}
+                    "connection_init" => {
+                        log::info!("connection_init: {}", text);
+                    }
                     "start" => {
                         let payload = request.payload.expect("could not deserialize payload");
-                        // let request_id = request.id.unwrap_or("1".to_owned());
+                        let request_id = request.id.unwrap_or("1".to_owned());
                         let database = self.database.clone();
                         let graphql_root = self.graphql_root.clone();
                         let context = JuniperContext::init(database);
@@ -113,7 +122,9 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocket {
                                 let mut stream = res.into_stream().unwrap();
                                 while let Some(response) = stream.next().await {
                                     let json = serde_json::to_string(&response).unwrap();
-                                    addr.do_send(JuniperResponce { json });
+                                    addr.do_send(JuniperResponce {
+                                        json: ws_data(&request_id, &json),
+                                    });
                                 }
                             }
                             .into_actor(self),

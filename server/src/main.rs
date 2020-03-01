@@ -15,12 +15,12 @@ use actix_web_actors::ws;
 use context::JuniperContext;
 use database::Database;
 use juniper::{
-    http::{playground::playground_source, GraphQLRequest},
+    http::{playground::playground_source, GraphQLRequest, GraphQLResponse, StreamError, StreamGraphQLResponse},
     DefaultScalarValue, InputValue,
 };
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
-use tokio::stream::{Stream, StreamExt};
+use tokio::stream::StreamExt;
 
 #[get("/playground")]
 pub async fn playground_handler() -> impl Responder {
@@ -34,31 +34,11 @@ async fn graphql_handler(
     req: web::Json<GraphQLRequest>,
     database: web::Data<Arc<Database>>,
 ) -> Result<impl Responder, Error> {
-    let res = web::block(move || {
-        let context = JuniperContext::init(database.get_ref().clone());
-        let res = req.execute(&graphql_root, &context);
-        Ok::<_, serde_json::error::Error>(serde_json::to_string(&res)?)
-    })
-    .await?;
-    Ok(HttpResponse::Ok().content_type("application/json").body(res))
+    let context = JuniperContext::init(database.get_ref().clone());
+    let res = req.execute_async(&graphql_root, &context).await;
+    let json_res = serde_json::to_string(&res)?;
+    Ok(HttpResponse::Ok().content_type("application/json").body(json_res))
 }
-
-// #[juniper::graphql_subscription(Context = JuniperContext)]
-// impl Subscription {
-//     async fn subscribe_for_messages(ctx: &JuniperContext) -> Stream<Message> {
-//         match ctx.ws_message {
-//             Message::Connected(token) => {
-//                 let user = parse_jwt_toke(token);
-//                 chat.join_user(user);
-//                 chat_usecase.subscribe_for_messages(user)
-//             }
-//             Message::Disconnected() => {
-//                 chat.left_user(user);
-//                 stream::empty::<Message>()
-//             }
-//         }
-//     }
-// }
 
 #[derive(Debug, Deserialize)]
 #[serde(bound = "GraphQLPayload<S>: Deserialize<'de>")]
@@ -79,55 +59,61 @@ struct GraphQLPayload<S = DefaultScalarValue> {
     query: Option<String>,
 }
 
-pub struct JuniperWebSocket {
+pub struct WebSocket {
     graphql_root: Arc<schema::Schema>,
     database: Arc<Database>,
 }
 
-impl JuniperWebSocket {
+impl WebSocket {
     pub fn new(graphql_root: Arc<schema::Schema>, database: Arc<Database>) -> Self {
         Self { graphql_root, database }
     }
 }
 
-impl Actor for JuniperWebSocket {
+impl Actor for WebSocket {
     type Context = ws::WebsocketContext<Self>;
+}
 
-    fn started(&mut self, ctx: &mut Self::Context) {
-        log::info!("started");
+pub struct JuniperResponce {
+    json: String,
+}
+
+impl Message for JuniperResponce {
+    type Result = ();
+}
+
+impl Handler<JuniperResponce> for WebSocket {
+    type Result = ();
+
+    fn handle(&mut self, msg: JuniperResponce, ctx: &mut Self::Context) {
+        log::info!("{}", msg.json);
+        ctx.text(msg.json);
     }
 }
 
-impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for JuniperWebSocket {
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocket {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
                 let request = serde_json::from_str::<WsPayload>(&text).unwrap();
                 match request.type_name.as_str() {
-                    "connection_init" => {
-                        // check jwt_token here
-                    }
+                    "connection_init" => {}
                     "start" => {
+                        let payload = request.payload.expect("could not deserialize payload");
+                        // let request_id = request.id.unwrap_or("1".to_owned());
                         let database = self.database.clone();
                         let graphql_root = self.graphql_root.clone();
+                        let context = JuniperContext::init(database);
+                        let req = GraphQLRequest::new(payload.query.unwrap(), payload.operaton_name, payload.variables);
+
+                        let addr = ctx.address();
                         ctx.spawn(
                             async move {
-                                let payload = request.payload.expect("could not deserialize payload");
-                                let request_id = request.id.unwrap_or("1".to_owned());
-
-                                let graphql_request = GraphQLRequest::new(
-                                    payload.query.unwrap(),
-                                    payload.operaton_name,
-                                    payload.variables,
-                                );
-                                let context = JuniperContext::init(database);
-                                let response_stream = graphql_request.subscribe(&graphql_root, &context).await;
-                                let mut stream = response_stream.into_stream().unwrap();
+                                let res = req.subscribe(&graphql_root, &context).await;
+                                let mut stream = res.into_stream().unwrap();
                                 while let Some(response) = stream.next().await {
-                                    let response_text = serde_json::to_string(&response).unwrap();
-                                    log::info!("{}", response_text);
-                                    //ctx.text(response_text);
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    addr.do_send(JuniperResponce { json });
                                 }
                             }
                             .into_actor(self),
@@ -137,7 +123,6 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for JuniperWebSocket 
                     _ => {}
                 }
             }
-            Ok(ws::Message::Binary(bin)) => ctx.binary(bin),
             Ok(ws::Message::Close(_)) => ctx.stop(),
             _ => (),
         }
@@ -152,7 +137,7 @@ async fn subscriptions_handler(
     database: web::Data<Arc<Database>>,
 ) -> Result<impl Responder, Error> {
     ws::start_with_protocols(
-        JuniperWebSocket::new(graphql_root.get_ref().clone(), database.get_ref().clone()),
+        WebSocket::new(graphql_root.get_ref().clone(), database.get_ref().clone()),
         &["graphql-ws"],
         &req,
         stream,

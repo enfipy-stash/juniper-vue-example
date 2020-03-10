@@ -1,0 +1,41 @@
+name: Build binary
+on: [push]
+jobs:
+  run:
+    name: Server build job
+    runs-on: ubuntu-16.04
+    steps:
+    - uses: actions/checkout@master
+    - name: Retrieve cache cargo build
+      uses: actions/cache@v1
+      id: cache-docker
+      with:
+        path: ./server/target
+        key: cache
+    - name: Install libraries
+      run: |
+        RUSTFLAGS=-Clinker=musl-gcc
+        DEBIAN_FRONTEND=noninteractive sudo apt-get -q update
+        sudo apt-get -qy install wget make gcc musl-tools clang llvm-dev libclang-dev
+        sudo apt-get -y remove openssl
+        sudo apt-get install ca-certificates
+        wget https://www.openssl.org/source/openssl-1.0.2g.tar.gz
+        tar -xzvf openssl-1.0.2g.tar.gz
+        cd openssl-1.0.2g
+        ./config
+        sudo make install
+        sudo ln -sf /usr/local/ssl/bin/openssl 'which openssl'
+    - name: Build server
+      run: |
+        cd server
+        export TARGET=x86_64-unknown-linux-musl
+        rustup target install ${TARGET}
+        cargo build --release --target=${TARGET}
+        sudo mv ./target/${TARGET}/release/juniper-vue-example ../app
+    # - name: Build image
+    #   run: docker build -t docker.pkg.github.com/enfipy/juniper-vue-example/v1 -f ./.github/docker/scratch.Dockerfile .
+    # - name: Build and Publish Tag Docker image
+    #   uses: VaultVulp/gp-docker-action@1.0.1
+    #   with:
+    #     github-token: ${{ secrets.GITHUB_TOKEN }}
+    #     image-name: docker.pkg.github.com/enfipy/juniper-vue-example/v1
